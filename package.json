@@ -1,0 +1,689 @@
+// ============================================================================
+// FILE: package.json
+// NPM dependencies and scripts
+// ============================================================================
+
+{
+  "name": "muscode-backend",
+  "version": "1.0.0",
+  "description": "MUSCode - Universal Online Code Compiler Backend",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "nodemon --exec ts-node src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "prisma:studio": "prisma studio",
+    "docker:build": "docker build -t muscode-api .",
+    "docker:run": "docker-compose up -d",
+    "docker:stop": "docker-compose down",
+    "test": "jest",
+    "lint": "eslint src/**/*.ts",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "keywords": ["compiler", "ide", "online", "code-execution"],
+  "author": "MUSCode Team",
+  "license": "MIT",
+  "dependencies": {
+    "@prisma/client": "^5.7.0",
+    "bcrypt": "^5.1.1",
+    "bull": "^4.12.0",
+    "cors": "^2.8.5",
+    "dockerode": "^4.0.2",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
+    "helmet": "^7.1.0",
+    "ioredis": "^5.3.2",
+    "jsonwebtoken": "^9.0.2",
+    "rate-limit-redis": "^4.2.0",
+    "socket.io": "^4.6.0"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/bull": "^4.10.0",
+    "@types/cors": "^2.8.17",
+    "@types/dockerode": "^3.3.23",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.5",
+    "@types/node": "^20.10.5",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "eslint": "^8.56.0",
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.2",
+    "prettier": "^3.1.1",
+    "prisma": "^5.7.0",
+    "ts-jest": "^29.1.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}
+
+// ============================================================================
+// FILE: tsconfig.json
+// TypeScript configuration
+// ============================================================================
+
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "moduleResolution": "node",
+    "allowSyntheticDefaultImports": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "**/*.spec.ts"]
+}
+
+// ============================================================================
+// FILE: .env.example
+// Environment variables template
+// ============================================================================
+
+/*
+# Server Configuration
+NODE_ENV=development
+PORT=3000
+
+# Database
+DATABASE_URL=postgresql://muscode:password@localhost:5432/muscode
+
+# Redis
+REDIS_URL=redis://localhost:6379
+
+# JWT Configuration
+JWT_SECRET=your_super_secure_jwt_secret_key_min_32_characters_long
+JWT_REFRESH_SECRET=your_super_secure_refresh_secret_key_min_32_characters
+JWT_EXPIRATION=15m
+JWT_REFRESH_EXPIRATION=7d
+
+# CORS
+CORS_ORIGIN=http://localhost:3001
+
+# Docker
+DOCKER_SOCKET=/var/run/docker.sock
+
+# Execution Limits
+EXECUTION_TIMEOUT=30
+MEMORY_LIMIT=256
+MAX_CODE_LENGTH=50000
+
+# Rate Limiting (requests per window)
+API_RATE_LIMIT=100
+EXECUTION_RATE_LIMIT=10
+AUTH_RATE_LIMIT=5
+
+# Email (Optional - for notifications)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=noreply@muscode.com
+SMTP_PASS=your_email_password
+
+# Logging
+LOG_LEVEL=info
+*/
+
+// ============================================================================
+// FILE: .gitignore
+// Git ignore configuration
+// ============================================================================
+
+/*
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Testing
+coverage/
+.nyc_output/
+
+# Prisma
+prisma/migrations/
+
+# Docker
+docker-compose.override.yml
+
+# Temp files
+tmp/
+temp/
+*/
+
+// ============================================================================
+// FILE: Dockerfile
+// Docker configuration for API server
+// ============================================================================
+
+/*
+FROM node:20-slim AS builder
+
+# Install dependencies for native modules
+RUN apt-get update && apt-get install -y \
+    python3 \
+    make \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY prisma ./prisma/
+
+# Install dependencies
+RUN npm ci
+
+# Copy source code
+COPY . .
+
+# Generate Prisma Client
+RUN npx prisma generate
+
+# Build TypeScript
+RUN npm run build
+
+# Production stage
+FROM node:20-slim
+
+# Install Docker CLI to manage containers
+RUN apt-get update && apt-get install -y \
+    docker.io \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy from builder
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/prisma ./prisma
+
+# Create non-root user
+RUN useradd -m -u 1001 muscode && \
+    chown -R muscode:muscode /app
+
+USER muscode
+
+EXPOSE 3000
+
+CMD ["node", "dist/server.js"]
+*/
+
+// ============================================================================
+// FILE: docker-compose.yml
+// Docker Compose for complete stack
+// ============================================================================
+
+/*
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: muscode-postgres
+    environment:
+      POSTGRES_DB: muscode
+      POSTGRES_USER: muscode
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secure_password_change_me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U muscode"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - muscode-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: muscode-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - muscode-network
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: muscode-api
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://muscode:${DB_PASSWORD:-secure_password_change_me}@postgres:5432/muscode
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - execution_temp:/tmp/executions
+    restart: unless-stopped
+    networks:
+      - muscode-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: muscode-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks:
+      - muscode-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  execution_temp:
+
+networks:
+  muscode-network:
+    driver: bridge
+*/
+
+// ============================================================================
+// FILE: nginx/nginx.conf
+// NGINX configuration
+// ============================================================================
+
+/*
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream api_backend {
+        least_conn;
+        server api:3000 max_fails=3 fail_timeout=30s;
+    }
+
+    # Rate limiting zones
+    limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=exec:10m rate=1r/s;
+
+    server {
+        listen 80;
+        server_name _;
+
+        # Redirect to HTTPS in production
+        # return 301 https://$server_name$request_uri;
+
+        client_max_body_size 10M;
+
+        # API endpoints
+        location /api/ {
+            limit_req zone=api burst=20 nodelay;
+            
+            proxy_pass http://api_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection 'upgrade';
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_cache_bypass $http_upgrade;
+            proxy_read_timeout 300s;
+            proxy_connect_timeout 75s;
+        }
+
+        # WebSocket endpoint
+        location /ws/ {
+            proxy_pass http://api_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_read_timeout 86400;
+        }
+
+        # Stricter rate limit for execution endpoint
+        location /api/v1/execute {
+            limit_req zone=exec burst=5 nodelay;
+            
+            proxy_pass http://api_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_read_timeout 300s;
+        }
+
+        # Health check
+        location /health {
+            proxy_pass http://api_backend;
+            access_log off;
+        }
+    }
+
+    # HTTPS configuration (uncomment in production)
+    # server {
+    #     listen 443 ssl http2;
+    #     server_name muscode.com;
+    #
+    #     ssl_certificate /etc/nginx/ssl/cert.pem;
+    #     ssl_certificate_key /etc/nginx/ssl/key.pem;
+    #     ssl_protocols TLSv1.2 TLSv1.3;
+    #     ssl_ciphers HIGH:!aNULL:!MD5;
+    #
+    #     # ... rest of configuration same as above
+    # }
+}
+*/
+
+// ============================================================================
+// FILE: scripts/setup.sh
+// Initial setup script
+// ============================================================================
+
+/*
+#!/bin/bash
+
+echo "🚀 Setting up MUSCode Backend..."
+
+# Check if Docker is installed
+if ! command -v docker &> /dev/null; then
+    echo "❌ Docker is not installed. Please install Docker first."
+    exit 1
+fi
+
+# Check if Node.js is installed
+if ! command -v node &> /dev/null; then
+    echo "❌ Node.js is not installed. Please install Node.js 18+ first."
+    exit 1
+fi
+
+# Create .env file if it doesn't exist
+if [ ! -f .env ]; then
+    echo "📝 Creating .env file..."
+    cp .env.example .env
+    echo "⚠️  Please update .env file with your configuration"
+fi
+
+# Install dependencies
+echo "📦 Installing dependencies..."
+npm install
+
+# Generate Prisma Client
+echo "🔧 Generating Prisma Client..."
+npx prisma generate
+
+# Pull Docker images for language runtimes
+echo "🐳 Pulling language runtime images..."
+docker pull python:3.11-slim
+docker pull node:20-slim
+docker pull openjdk:17-slim
+docker pull gcc:11
+docker pull php:8.2-cli-alpine
+
+echo "✅ Setup complete!"
+echo ""
+echo "Next steps:"
+echo "1. Update .env file with your configuration"
+echo "2. Start PostgreSQL and Redis: docker-compose up -d postgres redis"
+echo "3. Run database migrations: npm run prisma:migrate"
+echo "4. Start development server: npm run dev"
+echo ""
+echo "Or use Docker Compose for everything: docker-compose up -d"
+*/
+
+// ============================================================================
+// FILE: scripts/migrate.sh
+// Database migration script
+// ============================================================================
+
+/*
+#!/bin/bash
+
+echo "🗄️  Running database migrations..."
+
+# Check if DATABASE_URL is set
+if [ -z "$DATABASE_URL" ]; then
+    echo "❌ DATABASE_URL environment variable is not set"
+    exit 1
+fi
+
+# Run migrations
+npx prisma migrate deploy
+
+if [ $? -eq 0 ]; then
+    echo "✅ Migrations completed successfully"
+else
+    echo "❌ Migration failed"
+    exit 1
+fi
+
+# Generate Prisma Client
+npx prisma generate
+
+echo "✅ Database setup complete"
+*/
+
+// ============================================================================
+// FILE: README.md
+// Project documentation
+// ============================================================================
+
+/*
+# MUSCode Backend API
+
+Universal Online Code Compiler & IDE Backend
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Node.js 18+
+- Docker & Docker Compose
+- PostgreSQL 15+
+- Redis 7+
+
+### Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/muscode-backend.git
+cd muscode-backend
+```
+
+2. Run setup script:
+```bash
+chmod +x scripts/setup.sh
+./scripts/setup.sh
+```
+
+3. Configure environment:
+```bash
+cp .env.example .env
+# Edit .env with your configuration
+```
+
+4. Start services:
+```bash
+# Using Docker Compose (recommended)
+docker-compose up -d
+
+# Or manually
+docker-compose up -d postgres redis
+npm run prisma:migrate
+npm run dev
+```
+
+## 📚 API Documentation
+
+### Base URL
+```
+http://localhost:3000/api/v1
+```
+
+### Authentication
+All protected endpoints require a JWT token in the Authorization header:
+```
+Authorization: Bearer <token>
+```
+
+### Endpoints
+
+#### Authentication
+- POST `/auth/register` - Register new user
+- POST `/auth/login` - Login
+- POST `/auth/refresh` - Refresh access token
+- POST `/auth/logout` - Logout
+
+#### Code Execution
+- POST `/execute` - Execute code
+- GET `/execute/:executionId` - Get execution result
+
+#### Projects
+- GET `/projects` - List projects
+- POST `/projects` - Create project
+- GET `/projects/:id` - Get project details
+- PUT `/projects/:id` - Update project
+- DELETE `/projects/:id` - Delete project
+
+#### System
+- GET `/languages` - List supported languages
+- GET `/stats` - Get user statistics
+- GET `/health` - Health check
+
+### WebSocket
+Connect to `ws://localhost:3000/ws` for real-time updates.
+
+Events:
+- `subscribe:execution` - Subscribe to execution updates
+- `execution:status` - Execution status update
+- `execution:output` - Real-time output stream
+- `execution:complete` - Execution completed
+
+## 🏗️ Architecture
+
+```
+src/
+├── config/           # Configuration
+├── db/              # Database client
+├── middleware/      # Express middleware
+├── routes/          # API routes
+├── services/        # Business logic
+├── websocket/       # WebSocket server
+└── server.ts        # Entry point
+```
+
+## 🔒 Security Features
+
+- JWT authentication
+- Rate limiting
+- Sandboxed code execution
+- No network access in containers
+- Resource limits (CPU, Memory)
+- SQL injection prevention
+- XSS protection
+
+## 🐳 Docker Support
+
+### Build image:
+```bash
+docker build -t muscode-api .
+```
+
+### Run with Docker Compose:
+```bash
+docker-compose up -d
+```
+
+## 🧪 Testing
+
+```bash
+npm test
+```
+
+## 📝 License
+
+MIT License - see LICENSE file for details
+
+## 👥 Contributing
+
+1. Fork the repository
+2. Create feature branch
+3. Commit changes
+4. Push to branch
+5. Create Pull Request
+
+## 📧 Support
+
+For issues and questions, please create an issue on GitHub.
+*/
