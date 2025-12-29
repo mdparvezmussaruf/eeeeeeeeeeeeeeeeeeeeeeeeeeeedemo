@@ -1,0 +1,956 @@
+# MUSCode - Complete Backend Technical Specification
+
+## Table of Contents
+1. [System Architecture](#system-architecture)
+2. [Backend API Specification](#backend-api-specification)
+3. [Docker Execution Engine](#docker-execution-engine)
+4. [Database Schema](#database-schema)
+5. [WebSocket Integration](#websocket-integration)
+6. [Security Implementation](#security-implementation)
+7. [Deployment Guide](#deployment-guide)
+
+---
+
+## 1. System Architecture
+
+### High-Level Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         CLIENT LAYER                             │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │   Web App    │  │  Mobile App  │  │   API Client │          │
+│  │  (React)     │  │  (React N.)  │  │   (3rd Party)│          │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
+└─────────┼──────────────────┼──────────────────┼─────────────────┘
+          │                  │                  │
+          └──────────────────┼──────────────────┘
+                             │ HTTPS/WSS
+          ┌──────────────────▼──────────────────┐
+          │      NGINX Load Balancer            │
+          │   (SSL Termination, Rate Limiting)  │
+          └──────────────────┬──────────────────┘
+                             │
+          ┌──────────────────▼──────────────────┐
+          │         API GATEWAY LAYER            │
+          │  ┌────────────┐  ┌────────────┐     │
+          │  │ REST API   │  │ WebSocket  │     │
+          │  │ (Node.js)  │  │  Server    │     │
+          │  └─────┬──────┘  └─────┬──────┘     │
+          └────────┼───────────────┼─────────────┘
+                   │               │
+          ┌────────▼───────────────▼─────────────┐
+          │      APPLICATION LAYER               │
+          │  ┌─────────────────────────────┐     │
+          │  │   Auth Service              │     │
+          │  │   - JWT Validation          │     │
+          │  │   - Session Management      │     │
+          │  └─────────────────────────────┘     │
+          │  ┌─────────────────────────────┐     │
+          │  │   Code Execution Service    │     │
+          │  │   - Job Queue (Bull/Redis)  │     │
+          │  │   - Language Detection      │     │
+          │  │   - Timeout Management      │     │
+          │  └─────────────────────────────┘     │
+          │  ┌─────────────────────────────┐     │
+          │  │   Project Service           │     │
+          │  │   - CRUD Operations         │     │
+          │  │   - File Management         │     │
+          │  └─────────────────────────────┘     │
+          └──────────────┬───────────────────────┘
+                         │
+          ┌──────────────▼───────────────────────┐
+          │      EXECUTION LAYER                 │
+          │  ┌─────────────────────────────┐     │
+          │  │   Docker Engine             │     │
+          │  │  ┌───────┐ ┌───────┐        │     │
+          │  │  │Python │ │ Java  │ ...    │     │
+          │  │  │ Box   │ │ Box   │        │     │
+          │  │  └───────┘ └───────┘        │     │
+          │  │   (Isolated Containers)     │     │
+          │  └─────────────────────────────┘     │
+          └──────────────┬───────────────────────┘
+                         │
+          ┌──────────────▼───────────────────────┐
+          │      DATA LAYER                      │
+          │  ┌──────────┐  ┌──────────┐          │
+          │  │PostgreSQL│  │  Redis   │          │
+          │  │(Primary) │  │  (Cache) │          │
+          │  └──────────┘  └──────────┘          │
+          │  ┌──────────┐  ┌──────────┐          │
+          │  │   S3/    │  │  Logs    │          │
+          │  │  Minio   │  │(ELK Stack)│         │
+          │  └──────────┘  └──────────┘          │
+          └──────────────────────────────────────┘
+```
+
+### Component Communication Flow
+
+```
+User Action → API Gateway → Auth Middleware → Service Layer 
+    → Job Queue → Docker Executor → Response Stream → WebSocket → Client
+```
+
+---
+
+## 2. Backend API Specification
+
+### Technology Stack
+- **Runtime**: Node.js 20+ with Express.js
+- **Language**: TypeScript
+- **Job Queue**: Bull (Redis-backed)
+- **Authentication**: JWT + Passport.js
+- **Validation**: Joi / Zod
+- **ORM**: Prisma / TypeORM
+- **Documentation**: Swagger/OpenAPI
+
+### API Endpoints
+
+#### **Authentication Endpoints**
+
+```typescript
+POST /api/v1/auth/register
+Request:
+{
+  "email": "user@example.com",
+  "password": "SecurePass123!",
+  "username": "developer",
+  "fullName": "John Doe"
+}
+Response: 201
+{
+  "success": true,
+  "data": {
+    "userId": "uuid",
+    "token": "jwt_token",
+    "refreshToken": "refresh_token"
+  }
+}
+
+POST /api/v1/auth/login
+Request:
+{
+  "email": "user@example.com",
+  "password": "SecurePass123!"
+}
+Response: 200
+{
+  "success": true,
+  "data": {
+    "token": "jwt_token",
+    "refreshToken": "refresh_token",
+    "user": {
+      "id": "uuid",
+      "email": "user@example.com",
+      "username": "developer"
+    }
+  }
+}
+
+POST /api/v1/auth/refresh
+Request:
+{
+  "refreshToken": "refresh_token"
+}
+Response: 200
+{
+  "success": true,
+  "data": {
+    "token": "new_jwt_token"
+  }
+}
+
+POST /api/v1/auth/logout
+Headers: Authorization: Bearer {token}
+Response: 200
+{
+  "success": true,
+  "message": "Logged out successfully"
+}
+```
+
+#### **Code Execution Endpoints**
+
+```typescript
+POST /api/v1/execute
+Headers: Authorization: Bearer {token}
+Request:
+{
+  "language": "python",
+  "code": "print('Hello, World!')",
+  "stdin": "",
+  "timeout": 5,
+  "memoryLimit": 128
+}
+Response: 200
+{
+  "success": true,
+  "data": {
+    "executionId": "exec_uuid",
+    "status": "queued",
+    "estimatedTime": 2
+  }
+}
+
+GET /api/v1/execute/{executionId}
+Headers: Authorization: Bearer {token}
+Response: 200
+{
+  "success": true,
+  "data": {
+    "executionId": "exec_uuid",
+    "status": "completed",
+    "output": "Hello, World!\n",
+    "error": "",
+    "executionTime": 0.023,
+    "memoryUsed": 2.4,
+    "exitCode": 0,
+    "compilationError": null
+  }
+}
+
+POST /api/v1/execute/batch
+Headers: Authorization: Bearer {token}
+Request:
+{
+  "language": "java",
+  "files": [
+    {
+      "name": "Main.java",
+      "content": "public class Main { ... }"
+    },
+    {
+      "name": "Helper.java",
+      "content": "public class Helper { ... }"
+    }
+  ],
+  "mainFile": "Main.java",
+  "stdin": "",
+  "timeout": 10
+}
+Response: 200
+{
+  "success": true,
+  "data": {
+    "executionId": "exec_uuid",
+    "status": "queued"
+  }
+}
+```
+
+#### **Project Management Endpoints**
+
+```typescript
+GET /api/v1/projects
+Headers: Authorization: Bearer {token}
+Query: ?page=1&limit=10&sort=updatedAt
+Response: 200
+{
+  "success": true,
+  "data": {
+    "projects": [
+      {
+        "id": "proj_uuid",
+        "name": "My Python App",
+        "description": "Learning Python",
+        "language": "python",
+        "createdAt": "2025-01-01T00:00:00Z",
+        "updatedAt": "2025-01-15T10:30:00Z",
+        "fileCount": 3
+      }
+    ],
+    "pagination": {
+      "total": 25,
+      "page": 1,
+      "limit": 10,
+      "pages": 3
+    }
+  }
+}
+
+POST /api/v1/projects
+Headers: Authorization: Bearer {token}
+Request:
+{
+  "name": "New Project",
+  "description": "Description",
+  "language": "javascript",
+  "visibility": "private"
+}
+Response: 201
+{
+  "success": true,
+  "data": {
+    "id": "proj_uuid",
+    "name": "New Project",
+    "createdAt": "2025-01-15T10:30:00Z"
+  }
+}
+
+GET /api/v1/projects/{projectId}
+Headers: Authorization: Bearer {token}
+Response: 200
+{
+  "success": true,
+  "data": {
+    "id": "proj_uuid",
+    "name": "My Python App",
+    "description": "Learning Python",
+    "language": "python",
+    "files": [
+      {
+        "id": "file_uuid",
+        "name": "main.py",
+        "content": "print('Hello')",
+        "size": 1024,
+        "createdAt": "2025-01-01T00:00:00Z"
+      }
+    ]
+  }
+}
+
+PUT /api/v1/projects/{projectId}
+PATCH /api/v1/projects/{projectId}
+DELETE /api/v1/projects/{projectId}
+```
+
+#### **File Management Endpoints**
+
+```typescript
+POST /api/v1/projects/{projectId}/files
+Headers: Authorization: Bearer {token}
+Request:
+{
+  "name": "utils.py",
+  "content": "def helper(): pass",
+  "path": "/src"
+}
+Response: 201
+
+GET /api/v1/projects/{projectId}/files/{fileId}
+PUT /api/v1/projects/{projectId}/files/{fileId}
+DELETE /api/v1/projects/{projectId}/files/{fileId}
+```
+
+#### **Language & System Info**
+
+```typescript
+GET /api/v1/languages
+Response: 200
+{
+  "success": true,
+  "data": [
+    {
+      "id": "python",
+      "name": "Python",
+      "version": "3.11",
+      "extensions": [".py"],
+      "available": true
+    },
+    {
+      "id": "javascript",
+      "name": "JavaScript (Node.js)",
+      "version": "20.x",
+      "extensions": [".js"],
+      "available": true
+    }
+  ]
+}
+
+GET /api/v1/health
+Response: 200
+{
+  "status": "healthy",
+  "timestamp": "2025-01-15T10:30:00Z",
+  "services": {
+    "database": "up",
+    "redis": "up",
+    "docker": "up"
+  }
+}
+
+GET /api/v1/stats
+Headers: Authorization: Bearer {token}
+Response: 200
+{
+  "success": true,
+  "data": {
+    "totalExecutions": 1523,
+    "totalProjects": 42,
+    "storageUsed": 15.6,
+    "executionTimeToday": 145.2
+  }
+}
+```
+
+### Middleware Stack
+
+```typescript
+// middleware/auth.ts
+export const authenticateJWT = async (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'No token provided' });
+  
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    res.status(403).json({ error: 'Invalid token' });
+  }
+};
+
+// middleware/rateLimit.ts
+export const rateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP'
+});
+
+// middleware/validation.ts
+export const validateRequest = (schema) => {
+  return (req, res, next) => {
+    const { error } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({ error: error.details[0].message });
+    }
+    next();
+  };
+};
+```
+
+---
+
+## 3. Docker Execution Engine
+
+### Architecture
+
+```
+API Request → Job Queue → Executor Service → Docker Container → Result
+```
+
+### Docker Container Configuration
+
+#### Base Dockerfile Template
+
+```dockerfile
+# base-images/python/Dockerfile
+FROM python:3.11-slim
+
+# Security: Run as non-root user
+RUN useradd -m -u 1000 coderunner
+WORKDIR /workspace
+RUN chown coderunner:coderunner /workspace
+
+# Disable network (enforced at runtime)
+# Resource limits applied via Docker API
+
+# Install minimal dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+USER coderunner
+
+# Set execution timeout via wrapper
+COPY --chown=coderunner:coderunner timeout_wrapper.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/timeout_wrapper.sh
+
+ENTRYPOINT ["/usr/local/bin/timeout_wrapper.sh"]
+```
+
+#### Language-Specific Images
+
+```dockerfile
+# Java
+FROM openjdk:17-slim
+# ... security configuration ...
+CMD ["java"]
+
+# C/C++
+FROM gcc:11-slim
+# ... security configuration ...
+CMD ["gcc"]
+
+# JavaScript
+FROM node:20-slim
+# ... security configuration ...
+CMD ["node"]
+
+# PHP
+FROM php:8.2-cli-alpine
+# ... security configuration ...
+CMD ["php"]
+```
+
+### Executor Service Implementation
+
+```typescript
+// services/dockerExecutor.ts
+import Docker from 'dockerode';
+import { Readable } from 'stream';
+
+interface ExecutionConfig {
+  language: string;
+  code: string;
+  stdin?: string;
+  timeout: number;
+  memoryLimit: number;
+}
+
+interface ExecutionResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  executionTime: number;
+  memoryUsed: number;
+  timedOut: boolean;
+}
+
+class DockerExecutor {
+  private docker: Docker;
+  private imageMap: Map<string, string>;
+
+  constructor() {
+    this.docker = new Docker();
+    this.imageMap = new Map([
+      ['python', 'muscode/python:3.11'],
+      ['javascript', 'muscode/node:20'],
+      ['java', 'muscode/java:17'],
+      ['cpp', 'muscode/gcc:11'],
+      ['c', 'muscode/gcc:11'],
+      ['php', 'muscode/php:8.2']
+    ]);
+  }
+
+  async execute(config: ExecutionConfig): Promise<ExecutionResult> {
+    const startTime = Date.now();
+    const image = this.imageMap.get(config.language);
+    
+    if (!image) {
+      throw new Error(`Unsupported language: ${config.language}`);
+    }
+
+    // Create temporary files
+    const workDir = `/tmp/exec_${Date.now()}`;
+    await this.prepareWorkspace(workDir, config);
+
+    // Container configuration
+    const containerConfig = {
+      Image: image,
+      Cmd: this.getCommand(config.language),
+      HostConfig: {
+        Memory: config.memoryLimit * 1024 * 1024, // MB to bytes
+        MemorySwap: config.memoryLimit * 1024 * 1024,
+        NanoCpus: 1000000000, // 1 CPU
+        NetworkMode: 'none', // Disable network
+        ReadonlyRootfs: true,
+        CapDrop: ['ALL'], // Drop all capabilities
+        SecurityOpt: ['no-new-privileges'],
+        PidsLimit: 50,
+        Binds: [`${workDir}:/workspace:ro`]
+      },
+      WorkingDir: '/workspace',
+      User: '1000:1000',
+      AttachStdout: true,
+      AttachStderr: true,
+      OpenStdin: config.stdin ? true : false,
+      StdinOnce: true,
+      Tty: false
+    };
+
+    let container;
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+
+    try {
+      // Create container
+      container = await this.docker.createContainer(containerConfig);
+
+      // Start container
+      await container.start();
+
+      // Setup timeout
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => {
+          timedOut = true;
+          reject(new Error('Execution timeout'));
+        }, config.timeout * 1000);
+      });
+
+      // Attach to streams
+      const stream = await container.attach({
+        stream: true,
+        stdout: true,
+        stderr: true,
+        stdin: config.stdin ? true : false
+      });
+
+      // Handle stdin
+      if (config.stdin) {
+        stream.write(config.stdin);
+        stream.end();
+      }
+
+      // Collect output
+      const outputPromise = new Promise<void>((resolve) => {
+        stream.on('data', (chunk) => {
+          const data = chunk.toString();
+          if (chunk[0] === 1) stdout += data.slice(8);
+          else if (chunk[0] === 2) stderr += data.slice(8);
+        });
+        stream.on('end', resolve);
+      });
+
+      // Wait for completion or timeout
+      await Promise.race([
+        container.wait(),
+        timeoutPromise,
+        outputPromise
+      ]);
+
+      // Get container info
+      const info = await container.inspect();
+      const executionTime = (Date.now() - startTime) / 1000;
+
+      return {
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        exitCode: info.State.ExitCode,
+        executionTime,
+        memoryUsed: info.HostConfig.Memory / (1024 * 1024),
+        timedOut
+      };
+
+    } catch (error) {
+      if (timedOut) {
+        return {
+          stdout,
+          stderr: 'Execution timed out',
+          exitCode: 124,
+          executionTime: config.timeout,
+          memoryUsed: 0,
+          timedOut: true
+        };
+      }
+      throw error;
+    } finally {
+      // Cleanup
+      if (container) {
+        try {
+          await container.stop({ t: 1 });
+          await container.remove();
+        } catch (e) {
+          console.error('Container cleanup error:', e);
+        }
+      }
+      await this.cleanupWorkspace(workDir);
+    }
+  }
+
+  private async prepareWorkspace(dir: string, config: ExecutionConfig) {
+    const fs = require('fs').promises;
+    await fs.mkdir(dir, { recursive: true });
+    
+    const filename = this.getFilename(config.language);
+    await fs.writeFile(`${dir}/${filename}`, config.code);
+  }
+
+  private async cleanupWorkspace(dir: string) {
+    const fs = require('fs').promises;
+    try {
+      await fs.rm(dir, { recursive: true, force: true });
+    } catch (e) {
+      console.error('Workspace cleanup error:', e);
+    }
+  }
+
+  private getFilename(language: string): string {
+    const extensions = {
+      python: 'main.py',
+      javascript: 'main.js',
+      java: 'Main.java',
+      cpp: 'main.cpp',
+      c: 'main.c',
+      php: 'main.php'
+    };
+    return extensions[language] || 'main.txt';
+  }
+
+  private getCommand(language: string): string[] {
+    const commands = {
+      python: ['python', 'main.py'],
+      javascript: ['node', 'main.js'],
+      java: ['sh', '-c', 'javac Main.java && java Main'],
+      cpp: ['sh', '-c', 'g++ -o main main.cpp && ./main'],
+      c: ['sh', '-c', 'gcc -o main main.c && ./main'],
+      php: ['php', 'main.php']
+    };
+    return commands[language] || ['cat', 'main.txt'];
+  }
+}
+
+export default DockerExecutor;
+```
+
+### Job Queue Implementation
+
+```typescript
+// services/executionQueue.ts
+import Queue from 'bull';
+import DockerExecutor from './dockerExecutor';
+
+const executionQueue = new Queue('code-execution', {
+  redis: {
+    host: process.env.REDIS_HOST || 'localhost',
+    port: parseInt(process.env.REDIS_PORT || '6379')
+  }
+});
+
+// Process jobs
+executionQueue.process(async (job) => {
+  const { executionId, config } = job.data;
+  const executor = new DockerExecutor();
+  
+  try {
+    // Update status
+    await updateExecutionStatus(executionId, 'running');
+    
+    // Execute code
+    const result = await executor.execute(config);
+    
+    // Store result
+    await storeExecutionResult(executionId, result);
+    
+    // Update status
+    await updateExecutionStatus(executionId, 'completed');
+    
+    return result;
+  } catch (error) {
+    await updateExecutionStatus(executionId, 'failed');
+    throw error;
+  }
+});
+
+// Job events
+executionQueue.on('completed', (job, result) => {
+  console.log(`Job ${job.id} completed`);
+  // Emit WebSocket event
+  emitExecutionComplete(job.data.executionId, result);
+});
+
+executionQueue.on('failed', (job, err) => {
+  console.error(`Job ${job.id} failed:`, err);
+  // Emit WebSocket event
+  emitExecutionFailed(job.data.executionId, err.message);
+});
+
+export default executionQueue;
+```
+
+---
+
+## 4. Database Schema
+
+### Technology: PostgreSQL 15+
+
+### Schema Design
+
+```sql
+-- Users Table
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR(255) UNIQUE NOT NULL,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    full_name VARCHAR(100),
+    avatar_url TEXT,
+    email_verified BOOLEAN DEFAULT FALSE,
+    is_active BOOLEAN DEFAULT TRUE,
+    role VARCHAR(20) DEFAULT 'user' CHECK (role IN ('user', 'admin', 'moderator')),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    last_login_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Indexes
+    CONSTRAINT valid_email CHECK (email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}$')
+);
+
+CREATE INDEX idx_users_email ON users(email);
+CREATE INDEX idx_users_username ON users(username);
+CREATE INDEX idx_users_created_at ON users(created_at DESC);
+
+-- Refresh Tokens Table
+CREATE TABLE refresh_tokens (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token VARCHAR(500) UNIQUE NOT NULL,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    revoked BOOLEAN DEFAULT FALSE,
+    ip_address INET,
+    user_agent TEXT
+);
+
+CREATE INDEX idx_refresh_tokens_user_id ON refresh_tokens(user_id);
+CREATE INDEX idx_refresh_tokens_token ON refresh_tokens(token);
+
+-- Projects Table
+CREATE TABLE projects (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name VARCHAR(200) NOT NULL,
+    description TEXT,
+    language VARCHAR(50) NOT NULL,
+    visibility VARCHAR(20) DEFAULT 'private' CHECK (visibility IN ('private', 'public', 'unlisted')),
+    is_template BOOLEAN DEFAULT FALSE,
+    fork_from UUID REFERENCES projects(id) ON DELETE SET NULL,
+    star_count INTEGER DEFAULT 0,
+    view_count INTEGER DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP WITH TIME ZONE,
+    
+    CONSTRAINT valid_language CHECK (language IN ('python', 'javascript', 'java', 'cpp', 'c', 'php', 'go', 'rust', 'ruby'))
+);
+
+CREATE INDEX idx_projects_user_id ON projects(user_id);
+CREATE INDEX idx_projects_language ON projects(language);
+CREATE INDEX idx_projects_visibility ON projects(visibility);
+CREATE INDEX idx_projects_created_at ON projects(created_at DESC);
+CREATE INDEX idx_projects_updated_at ON projects(updated_at DESC);
+
+-- Files Table
+CREATE TABLE files (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    path VARCHAR(500) DEFAULT '/',
+    content TEXT,
+    size_bytes BIGINT DEFAULT 0,
+    language VARCHAR(50),
+    is_main BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    
+    CONSTRAINT unique_file_path UNIQUE (project_id, path, name)
+);
+
+CREATE INDEX idx_files_project_id ON files(project_id);
+CREATE INDEX idx_files_is_main ON files(is_main);
+
+-- Executions Table
+CREATE TABLE executions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id UUID REFERENCES projects(id) ON DELETE SET NULL,
+    language VARCHAR(50) NOT NULL,
+    status VARCHAR(20) DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed', 'timeout')),
+    stdin TEXT,
+    stdout TEXT,
+    stderr TEXT,
+    exit_code INTEGER,
+    execution_time_ms INTEGER,
+    memory_used_mb DECIMAL(10, 2),
+    timed_out BOOLEAN DEFAULT FALSE,
+    compilation_error TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP WITH TIME ZONE,
+    completed_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX idx_executions_user_id ON executions(user_id);
+CREATE INDEX idx_executions_project_id ON executions(project_id);
+CREATE INDEX idx_executions_status ON executions(status);
+CREATE INDEX idx_executions_created_at ON executions(created_at DESC);
+
+-- User Quotas Table
+CREATE TABLE user_quotas (
+    user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    executions_today INTEGER DEFAULT 0,
+    executions_month INTEGER DEFAULT 0,
+    storage_used_mb DECIMAL(10, 2) DEFAULT 0,
+    max_executions_daily INTEGER DEFAULT 100,
+    max_executions_monthly INTEGER DEFAULT 1000,
+    max_storage_mb INTEGER DEFAULT 100,
+    last_reset_daily DATE DEFAULT CURRENT_DATE,
+    last_reset_monthly DATE DEFAULT CURRENT_DATE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Favorites/Stars Table
+CREATE TABLE project_stars (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    
+    CONSTRAINT unique_user_project_star UNIQUE (user_id, project_id)
+);
+
+CREATE INDEX idx_project_stars_user_id ON project_stars(user_id);
+CREATE INDEX idx_project_stars_project_id ON project_stars(project_id);
+
+-- Comments Table
+CREATE TABLE comments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    parent_id UUID REFERENCES comments(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX idx_comments_project_id ON comments(project_id);
+CREATE INDEX idx_comments_user_id ON comments(user_id);
+CREATE INDEX idx_comments_parent_id ON comments(parent_id);
+
+-- Audit Logs Table
+CREATE TABLE audit_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    action VARCHAR(50) NOT NULL,
+    resource_type VARCHAR(50),
+    resource_id UUID,
+    ip_address INET,
+    user_agent TEXT,
+    metadata JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_audit_logs_user_id ON audit_logs(user_id);
+CREATE INDEX idx_audit_logs_action ON audit_logs(action);
+CREATE INDEX idx_audit_logs_created_at ON audit_logs(created_at DESC);
+
+-- Functions and Triggers
+CREATE OR REPLACE FUNCTION update_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER update_users_updated_at
+    BEFORE UPDATE ON users
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER update_projects_updated_at
+    BEFORE UPDATE ON projects
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER update_files_updated_at
+    BEFORE UPDATE ON files
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at();
+
+-- Views
+CREATE VIEW user_statistics AS
+SELECT 
+    u.id,
+    u.username,
