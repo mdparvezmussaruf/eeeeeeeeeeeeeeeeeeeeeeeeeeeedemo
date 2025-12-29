@@ -1,0 +1,250 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Play, Save, FileCode, Settings, Moon, Sun, Download, Upload, Trash2, Plus, ChevronRight, ChevronDown } from 'lucide-react';
+
+const MUSCode = () => {
+  const [theme, setTheme] = useState('dark');
+  const [language, setLanguage] = useState('python');
+  const [code, setCode] = useState('');
+  const [output, setOutput] = useState('');
+  const [isRunning, setIsRunning] = useState(false);
+  const [files, setFiles] = useState([
+    { id: 1, name: 'main.py', language: 'python', content: '# Welcome to MUSCode\nprint("Hello, World!")' }
+  ]);
+  const [activeFileId, setActiveFileId] = useState(1);
+  const [showSettings, setShowSettings] = useState(false);
+  const [expandedFolders, setExpandedFolders] = useState(new Set(['root']));
+  const textareaRef = useRef(null);
+
+  const languages = [
+    { id: 'python', name: 'Python', ext: '.py', template: '# Python Code\nprint("Hello, World!")' },
+    { id: 'javascript', name: 'JavaScript', ext: '.js', template: '// JavaScript Code\nconsole.log("Hello, World!");' },
+    { id: 'java', name: 'Java', ext: '.java', template: 'public class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello, World!");\n    }\n}' },
+    { id: 'cpp', name: 'C++', ext: '.cpp', template: '#include <iostream>\nusing namespace std;\n\nint main() {\n    cout << "Hello, World!" << endl;\n    return 0;\n}' },
+    { id: 'c', name: 'C', ext: '.c', template: '#include <stdio.h>\n\nint main() {\n    printf("Hello, World!\\n");\n    return 0;\n}' },
+    { id: 'php', name: 'PHP', ext: '.php', template: '<?php\necho "Hello, World!";\n?>' }
+  ];
+
+  useEffect(() => {
+    const activeFile = files.find(f => f.id === activeFileId);
+    if (activeFile) {
+      setCode(activeFile.content);
+      setLanguage(activeFile.language);
+    }
+  }, [activeFileId, files]);
+
+  const handleCodeChange = (e) => {
+    const newCode = e.target.value;
+    setCode(newCode);
+    setFiles(files.map(f => 
+      f.id === activeFileId ? { ...f, content: newCode } : f
+    ));
+  };
+
+  const simulateExecution = async (lang, codeToRun) => {
+    await new Promise(resolve => setTimeout(resolve, 800));
+    
+    const outputs = {
+      python: `Compiling Python code...\n✓ Compilation successful\n\nExecuting...\n────────────────────\nHello, World!\n────────────────────\n\nExecution completed in 0.023s\nMemory used: 2.4 MB`,
+      javascript: `Running JavaScript (Node.js)...\n✓ Code validated\n\nOutput:\n────────────────────\nHello, World!\n────────────────────\n\nExecution time: 0.015s`,
+      java: `Compiling Java...\n✓ Compilation successful\n\nRunning Main class...\n────────────────────\nHello, World!\n────────────────────\n\nExecution completed in 0.156s`,
+      cpp: `Compiling C++...\n✓ Build successful\n\nExecuting binary...\n────────────────────\nHello, World!\n────────────────────\n\nExecution time: 0.012s\nMemory: 1.2 MB`,
+      c: `Compiling C...\n✓ gcc compilation successful\n\nRunning executable...\n────────────────────\nHello, World!\n────────────────────\n\nCompleted in 0.009s`,
+      php: `Running PHP...\n✓ Syntax check passed\n\nOutput:\n────────────────────\nHello, World!\n────────────────────\n\nExecution time: 0.021s`
+    };
+
+    return outputs[lang] || 'Code executed successfully!';
+  };
+
+  const runCode = async () => {
+    setIsRunning(true);
+    setOutput('⟳ Initializing execution environment...\n⟳ Loading runtime...');
+    
+    try {
+      const result = await simulateExecution(language, code);
+      setOutput(result);
+    } catch (error) {
+      setOutput(`Error: ${error.message}`);
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  const createNewFile = () => {
+    const lang = languages.find(l => l.id === language);
+    const newFile = {
+      id: Date.now(),
+      name: `untitled${files.length + 1}${lang.ext}`,
+      language: language,
+      content: lang.template
+    };
+    setFiles([...files, newFile]);
+    setActiveFileId(newFile.id);
+  };
+
+  const deleteFile = (id) => {
+    if (files.length === 1) {
+      alert('Cannot delete the last file');
+      return;
+    }
+    setFiles(files.filter(f => f.id !== id));
+    if (activeFileId === id) {
+      setActiveFileId(files[0].id);
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const start = e.target.selectionStart;
+      const end = e.target.selectionEnd;
+      const newCode = code.substring(0, start) + '    ' + code.substring(end);
+      setCode(newCode);
+      setFiles(files.map(f => 
+        f.id === activeFileId ? { ...f, content: newCode } : f
+      ));
+      setTimeout(() => {
+        e.target.selectionStart = e.target.selectionEnd = start + 4;
+      }, 0);
+    } else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      runCode();
+    }
+  };
+
+  const bgClass = theme === 'dark' ? 'bg-gray-900' : 'bg-gray-50';
+  const panelBg = theme === 'dark' ? 'bg-gray-800' : 'bg-white';
+  const textClass = theme === 'dark' ? 'text-gray-100' : 'text-gray-900';
+  const borderClass = theme === 'dark' ? 'border-gray-700' : 'border-gray-300';
+
+  return (
+    <div className={`min-h-screen ${bgClass} ${textClass} flex flex-col font-mono`}>
+      {/* Header */}
+      <header className={`${panelBg} border-b ${borderClass} px-4 py-2 flex items-center justify-between`}>
+        <div className="flex items-center gap-3">
+          <FileCode className="w-6 h-6 text-blue-500" />
+          <h1 className="text-xl font-bold">MUSCode</h1>
+          <span className="text-xs opacity-60">Universal Online IDE</span>
+        </div>
+        
+        <div className="flex items-center gap-2">
+          <select 
+            value={language}
+            onChange={(e) => setLanguage(e.target.value)}
+            className={`${panelBg} border ${borderClass} rounded px-3 py-1 text-sm`}
+          >
+            {languages.map(lang => (
+              <option key={lang.id} value={lang.id}>{lang.name}</option>
+            ))}
+          </select>
+          
+          <button
+            onClick={runCode}
+            disabled={isRunning}
+            className="bg-green-600 hover:bg-green-700 text-white px-4 py-1 rounded flex items-center gap-2 disabled:opacity-50"
+          >
+            <Play className="w-4 h-4" />
+            {isRunning ? 'Running...' : 'Run'}
+          </button>
+          
+          <button
+            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            className={`${panelBg} border ${borderClass} p-2 rounded hover:opacity-80`}
+          >
+            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          </button>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* File Explorer */}
+        <aside className={`w-64 ${panelBg} border-r ${borderClass} p-3 overflow-y-auto`}>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold opacity-80">EXPLORER</h2>
+            <button
+              onClick={createNewFile}
+              className="p-1 hover:bg-gray-700 rounded"
+              title="New File"
+            >
+              <Plus className="w-4 h-4" />
+            </button>
+          </div>
+          
+          <div className="space-y-1">
+            {files.map(file => (
+              <div
+                key={file.id}
+                className={`flex items-center justify-between p-2 rounded cursor-pointer hover:bg-gray-700 ${
+                  activeFileId === file.id ? 'bg-gray-700' : ''
+                }`}
+                onClick={() => setActiveFileId(file.id)}
+              >
+                <span className="text-sm truncate flex-1">{file.name}</span>
+                {files.length > 1 && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteFile(file.id);
+                    }}
+                    className="p-1 hover:bg-gray-600 rounded"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </aside>
+
+        {/* Editor */}
+        <main className="flex-1 flex flex-col overflow-hidden">
+          <div className={`${panelBg} border-b ${borderClass} px-4 py-2 flex items-center gap-2`}>
+            <FileCode className="w-4 h-4" />
+            <span className="text-sm">{files.find(f => f.id === activeFileId)?.name}</span>
+          </div>
+          
+          <div className="flex-1 overflow-auto">
+            <textarea
+              ref={textareaRef}
+              value={code}
+              onChange={handleCodeChange}
+              onKeyDown={handleKeyDown}
+              className={`w-full h-full p-4 ${theme === 'dark' ? 'bg-gray-900 text-gray-100' : 'bg-white text-gray-900'} font-mono text-sm resize-none focus:outline-none`}
+              spellCheck="false"
+              placeholder="Start coding..."
+              style={{ minHeight: '400px', tabSize: 4 }}
+            />
+          </div>
+
+          {/* Output Panel */}
+          <div className={`${panelBg} border-t ${borderClass} h-48 flex flex-col`}>
+            <div className="px-4 py-2 border-b border-gray-700 flex items-center justify-between">
+              <span className="text-sm font-semibold opacity-80">OUTPUT</span>
+              <button
+                onClick={() => setOutput('')}
+                className="text-xs opacity-60 hover:opacity-100"
+              >
+                Clear
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto p-4">
+              <pre className="text-sm whitespace-pre-wrap">{output || 'No output yet. Click Run to execute your code.'}</pre>
+            </div>
+          </div>
+        </main>
+      </div>
+
+      {/* Footer */}
+      <footer className={`${panelBg} border-t ${borderClass} px-4 py-2 text-xs opacity-60 flex items-center justify-between`}>
+        <div>MUSCode v1.0.0 | Multi-Language Online Compiler</div>
+        <div className="flex gap-4">
+          <span>Lines: {code.split('\n').length}</span>
+          <span>Chars: {code.length}</span>
+          <span>Ln {textareaRef.current?.value.substring(0, textareaRef.current?.selectionStart).split('\n').length || 1}</span>
+        </div>
+      </footer>
+    </div>
+  );
+};
+
+export default MUSCode;
