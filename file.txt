@@ -954,3 +954,802 @@ CREATE VIEW user_statistics AS
 SELECT 
     u.id,
     u.username,
+    u.created_at,
+    COUNT(DISTINCT p.id) as total_projects,
+    COUNT(DISTINCT e.id) as total_executions,
+    COALESCE(SUM(f.size_bytes), 0) / (1024 * 1024) as storage_used_mb,
+    (SELECT COUNT(*) FROM project_stars ps WHERE ps.user_id = u.id) as stars_given,
+    (SELECT COUNT(*) FROM project_stars ps 
+     JOIN projects p2 ON ps.project_id = p2.id 
+     WHERE p2.user_id = u.id) as stars_received
+FROM users u
+LEFT JOIN projects p ON u.id = p.user_id
+LEFT JOIN files f ON p.id = f.project_id
+LEFT JOIN executions e ON u.id = e.user_id
+GROUP BY u.id, u.username, u.created_at;
+```
+
+### Prisma Schema (Alternative ORM)
+
+```prisma
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  username      String    @unique
+  passwordHash  String    @map("password_hash")
+  fullName      String?   @map("full_name")
+  avatarUrl     String?   @map("avatar_url")
+  emailVerified Boolean   @default(false) @map("email_verified")
+  isActive      Boolean   @default(true) @map("is_active")
+  role          UserRole  @default(USER)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  lastLoginAt   DateTime? @map("last_login_at")
+
+  projects      Project[]
+  executions    Execution[]
+  refreshTokens RefreshToken[]
+  stars         ProjectStar[]
+  comments      Comment[]
+  quota         UserQuota?
+
+  @@map("users")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+  MODERATOR
+}
+
+model Project {
+  id          String      @id @default(uuid())
+  userId      String      @map("user_id")
+  name        String
+  description String?
+  language    String
+  visibility  Visibility  @default(PRIVATE)
+  isTemplate  Boolean     @default(false) @map("is_template")
+  forkFrom    String?     @map("fork_from")
+  starCount   Int         @default(0) @map("star_count")
+  viewCount   Int         @default(0) @map("view_count")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+  deletedAt   DateTime?   @map("deleted_at")
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  files       File[]
+  executions  Execution[]
+  stars       ProjectStar[]
+  comments    Comment[]
+
+  @@index([userId])
+  @@index([language])
+  @@map("projects")
+}
+
+enum Visibility {
+  PRIVATE
+  PUBLIC
+  UNLISTED
+}
+
+model File {
+  id        String   @id @default(uuid())
+  projectId String   @map("project_id")
+  name      String
+  path      String   @default("/")
+  content   String?
+  sizeBytes BigInt   @default(0) @map("size_bytes")
+  language  String?
+  isMain    Boolean  @default(false) @map("is_main")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, path, name])
+  @@map("files")
+}
+
+model Execution {
+  id                String    @id @default(uuid())
+  userId            String    @map("user_id")
+  projectId         String?   @map("project_id")
+  language          String
+  status            ExecStatus @default(QUEUED)
+  stdin             String?
+  stdout            String?
+  stderr            String?
+  exitCode          Int?      @map("exit_code")
+  executionTimeMs   Int?      @map("execution_time_ms")
+  memoryUsedMb      Decimal?  @map("memory_used_mb") @db.Decimal(10, 2)
+  timedOut          Boolean   @default(false) @map("timed_out")
+  compilationError  String?   @map("compilation_error")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  startedAt         DateTime? @map("started_at")
+  completedAt       DateTime? @map("completed_at")
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([projectId])
+  @@map("executions")
+}
+
+enum ExecStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  TIMEOUT
+}
+```
+
+---
+
+## 5. WebSocket Integration
+
+### WebSocket Server Implementation
+
+```typescript
+// websocket/server.ts
+import { Server } from 'socket.io';
+import { createServer } from 'http';
+import jwt from 'jsonwebtoken';
+
+interface SocketUser {
+  userId: string;
+  username: string;
+}
+
+declare module 'socket.io' {
+  interface Socket {
+    user?: SocketUser;
+  }
+}
+
+export function setupWebSocket(httpServer) {
+  const io = new Server(httpServer, {
+    cors: {
+      origin: process.env.CORS_ORIGIN || '*',
+      credentials: true
+    },
+    path: '/ws',
+    transports: ['websocket', 'polling']
+  });
+
+  // Authentication middleware
+  io.use(async (socket, next) => {
+    try {
+      const token = socket.handshake.auth.token || 
+                   socket.handshake.headers.authorization?.split(' ')[1];
+      
+      if (!token) {
+        return next(new Error('Authentication required'));
+      }
+
+      const decoded = jwt.verify(token, process.env.JWT_SECRET) as SocketUser;
+      socket.user = decoded;
+      next();
+    } catch (error) {
+      next(new Error('Invalid token'));
+    }
+  });
+
+  io.on('connection', (socket) => {
+    console.log(`User connected: ${socket.user?.userId}`);
+
+    // Join user's personal room
+    socket.join(`user:${socket.user?.userId}`);
+
+    // Handle execution subscription
+    socket.on('subscribe:execution', (executionId: string) => {
+      socket.join(`execution:${executionId}`);
+      console.log(`User ${socket.user?.userId} subscribed to execution ${executionId}`);
+    });
+
+    // Handle execution unsubscription
+    socket.on('unsubscribe:execution', (executionId: string) => {
+      socket.leave(`execution:${executionId}`);
+    });
+
+    // Handle project collaboration
+    socket.on('join:project', (projectId: string) => {
+      socket.join(`project:${projectId}`);
+    });
+
+    socket.on('leave:project', (projectId: string) => {
+      socket.leave(`project:${projectId}`);
+    });
+
+    // Real-time code collaboration
+    socket.on('code:update', async (data) => {
+      const { projectId, fileId, content, cursorPosition } = data;
+      
+      // Broadcast to other users in the same project
+      socket.to(`project:${projectId}`).emit('code:changed', {
+        fileId,
+        content,
+        userId: socket.user?.userId,
+        username: socket.user?.username,
+        cursorPosition
+      });
+    });
+
+    // Handle disconnection
+    socket.on('disconnect', () => {
+      console.log(`User disconnected: ${socket.user?.userId}`);
+    });
+  });
+
+  return io;
+}
+
+// Event emitters for execution updates
+export class ExecutionEventEmitter {
+  private io: Server;
+
+  constructor(io: Server) {
+    this.io = io;
+  }
+
+  emitExecutionStatus(executionId: string, status: string, data?: any) {
+    this.io.to(`execution:${executionId}`).emit('execution:status', {
+      executionId,
+      status,
+      timestamp: new Date(),
+      ...data
+    });
+  }
+
+  emitExecutionOutput(executionId: string, type: 'stdout' | 'stderr', data: string) {
+    this.io.to(`execution:${executionId}`).emit('execution:output', {
+      executionId,
+      type,
+      data,
+      timestamp: new Date()
+    });
+  }
+
+  emitExecutionComplete(executionId: string, result: any) {
+    this.io.to(`execution:${executionId}`).emit('execution:complete', {
+      executionId,
+      result,
+      timestamp: new Date()
+    });
+  }
+
+  emitExecutionError(executionId: string, error: string) {
+    this.io.to(`execution:${executionId}`).emit('execution:error', {
+      executionId,
+      error,
+      timestamp: new Date()
+    });
+  }
+}
+```
+
+### Client-Side WebSocket Integration
+
+```typescript
+// client/services/websocket.ts
+import io, { Socket } from 'socket.io-client';
+
+class WebSocketClient {
+  private socket: Socket | null = null;
+  private token: string | null = null;
+
+  connect(token: string) {
+    this.token = token;
+    this.socket = io(process.env.REACT_APP_WS_URL || 'ws://localhost:3000', {
+      path: '/ws',
+      auth: { token },
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000
+    });
+
+    this.socket.on('connect', () => {
+      console.log('WebSocket connected');
+    });
+
+    this.socket.on('disconnect', () => {
+      console.log('WebSocket disconnected');
+    });
+
+    this.socket.on('error', (error) => {
+      console.error('WebSocket error:', error);
+    });
+
+    return this.socket;
+  }
+
+  disconnect() {
+    if (this.socket) {
+      this.socket.disconnect();
+      this.socket = null;
+    }
+  }
+
+  subscribeToExecution(executionId: string, callbacks: {
+    onStatus?: (data: any) => void;
+    onOutput?: (data: any) => void;
+    onComplete?: (data: any) => void;
+    onError?: (data: any) => void;
+  }) {
+    if (!this.socket) throw new Error('Not connected');
+
+    this.socket.emit('subscribe:execution', executionId);
+
+    if (callbacks.onStatus) {
+      this.socket.on('execution:status', callbacks.onStatus);
+    }
+    if (callbacks.onOutput) {
+      this.socket.on('execution:output', callbacks.onOutput);
+    }
+    if (callbacks.onComplete) {
+      this.socket.on('execution:complete', callbacks.onComplete);
+    }
+    if (callbacks.onError) {
+      this.socket.on('execution:error', callbacks.onError);
+    }
+  }
+
+  unsubscribeFromExecution(executionId: string) {
+    if (!this.socket) return;
+    this.socket.emit('unsubscribe:execution', executionId);
+    this.socket.off('execution:status');
+    this.socket.off('execution:output');
+    this.socket.off('execution:complete');
+    this.socket.off('execution:error');
+  }
+
+  joinProject(projectId: string) {
+    if (!this.socket) throw new Error('Not connected');
+    this.socket.emit('join:project', projectId);
+  }
+
+  leaveProject(projectId: string) {
+    if (!this.socket) return;
+    this.socket.emit('leave:project', projectId);
+  }
+
+  sendCodeUpdate(projectId: string, fileId: string, content: string, cursorPosition: any) {
+    if (!this.socket) throw new Error('Not connected');
+    this.socket.emit('code:update', {
+      projectId,
+      fileId,
+      content,
+      cursorPosition
+    });
+  }
+
+  onCodeChanged(callback: (data: any) => void) {
+    if (!this.socket) throw new Error('Not connected');
+    this.socket.on('code:changed', callback);
+  }
+}
+
+export default new WebSocketClient();
+```
+
+### React Hook for Executions
+
+```typescript
+// client/hooks/useExecution.ts
+import { useState, useEffect } from 'react';
+import wsClient from '../services/websocket';
+import api from '../services/api';
+
+export function useExecution() {
+  const [output, setOutput] = useState('');
+  const [status, setStatus] = useState('idle');
+  const [executionId, setExecutionId] = useState<string | null>(null);
+
+  const runCode = async (language: string, code: string, stdin?: string) => {
+    setOutput('');
+    setStatus('queued');
+
+    try {
+      // Create execution
+      const response = await api.post('/execute', {
+        language,
+        code,
+        stdin,
+        timeout: 10,
+        memoryLimit: 128
+      });
+
+      const { executionId: newExecId } = response.data.data;
+      setExecutionId(newExecId);
+
+      // Subscribe to WebSocket updates
+      wsClient.subscribeToExecution(newExecId, {
+        onStatus: (data) => {
+          setStatus(data.status);
+        },
+        onOutput: (data) => {
+          setOutput(prev => prev + data.data);
+        },
+        onComplete: (data) => {
+          setStatus('completed');
+          setOutput(prev => prev + '\n\n' + formatResult(data.result));
+        },
+        onError: (data) => {
+          setStatus('error');
+          setOutput(prev => prev + '\n\nError: ' + data.error);
+        }
+      });
+
+    } catch (error) {
+      setStatus('error');
+      setOutput('Failed to start execution: ' + error.message);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (executionId) {
+        wsClient.unsubscribeFromExecution(executionId);
+      }
+    };
+  }, [executionId]);
+
+  return { output, status, runCode };
+}
+
+function formatResult(result: any) {
+  return `
+────────────────────
+Exit Code: ${result.exitCode}
+Execution Time: ${result.executionTime}s
+Memory Used: ${result.memoryUsed} MB
+────────────────────
+  `.trim();
+}
+```
+
+---
+
+## 6. Security Implementation
+
+### Security Checklist
+
+```yaml
+Container Security:
+  ✓ Run as non-root user (UID 1000)
+  ✓ Read-only root filesystem
+  ✓ No network access (NetworkMode: none)
+  ✓ Drop all Linux capabilities
+  ✓ Resource limits (CPU, Memory, PIDs)
+  ✓ Execution timeout enforcement
+  ✓ Temporary filesystem cleanup
+
+API Security:
+  ✓ JWT authentication with expiration
+  ✓ Refresh token rotation
+  ✓ Rate limiting per IP/user
+  ✓ Input validation (Joi/Zod)
+  ✓ SQL injection prevention (Parameterized queries)
+  ✓ XSS prevention (Content Security Policy)
+  ✓ CORS configuration
+  ✓ HTTPS enforcement
+
+Application Security:
+  ✓ Password hashing (bcrypt, 12 rounds)
+  ✓ Email verification
+  ✓ Account lockout after failed attempts
+  ✓ Audit logging
+  ✓ User quotas and rate limits
+  ✓ File size limits
+  ✓ Code length limits
+```
+
+### Rate Limiting Configuration
+
+```typescript
+// middleware/rateLimiter.ts
+import rateLimit from 'express-rate-limit';
+import RedisStore from 'rate-limit-redis';
+import Redis from 'ioredis';
+
+const redis = new Redis(process.env.REDIS_URL);
+
+// General API rate limit
+export const apiLimiter = rateLimit({
+  store: new RedisStore({
+    client: redis,
+    prefix: 'rl:api:'
+  }),
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100,
+  message: 'Too many requests, please try again later'
+});
+
+// Execution rate limit
+export const executionLimiter = rateLimit({
+  store: new RedisStore({
+    client: redis,
+    prefix: 'rl:exec:'
+  }),
+  windowMs: 60 * 1000, // 1 minute
+  max: 10,
+  message: 'Too many code executions, please wait'
+});
+
+// Auth rate limit
+export const authLimiter = rateLimit({
+  store: new RedisStore({
+    client: redis,
+    prefix: 'rl:auth:'
+  }),
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: 'Too many authentication attempts'
+});
+```
+
+---
+
+## 7. Deployment Guide
+
+### Docker Compose Setup
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: muscode
+      POSTGRES_USER: muscode
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U muscode"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://muscode:${DB_PASSWORD}@postgres:5432/muscode
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - execution_temp:/tmp/executions
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - redis
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - execution_temp:/tmp/executions
+    restart: unless-stopped
+    deploy:
+      replicas: 3
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./frontend/build:/usr/share/nginx/html:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  execution_temp:
+```
+
+### NGINX Configuration
+
+```nginx
+# nginx/nginx.conf
+upstream api_backend {
+    least_conn;
+    server api:3000 max_fails=3 fail_timeout=30s;
+}
+
+server {
+    listen 80;
+    server_name muscode.com;
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name muscode.com;
+
+    ssl_certificate /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Rate limiting
+    limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=exec:10m rate=1r/s;
+
+    # Frontend
+    location / {
+        root /usr/share/nginx/html;
+        try_files $uri /index.html;
+        add_header Cache-Control "no-cache";
+    }
+
+    # API
+    location /api/ {
+        limit_req zone=api burst=20 nodelay;
+        proxy_pass http://api_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_cache_bypass $http_upgrade;
+    }
+
+    # WebSocket
+    location /ws/ {
+        proxy_pass http://api_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 86400;
+    }
+
+    # Execution endpoint (stricter rate limit)
+    location /api/v1/execute {
+        limit_req zone=exec burst=5 nodelay;
+        proxy_pass http://api_backend;
+    }
+}
+```
+
+### Environment Variables
+
+```bash
+# .env.example
+NODE_ENV=production
+PORT=3000
+
+# Database
+DATABASE_URL=postgresql://muscode:password@localhost:5432/muscode
+DB_PASSWORD=your_secure_password
+
+# Redis
+REDIS_URL=redis://localhost:6379
+
+# JWT
+JWT_SECRET=your_jwt_secret_key_min_32_chars
+JWT_REFRESH_SECRET=your_refresh_secret_key_min_32_chars
+JWT_EXPIRATION=15m
+JWT_REFRESH_EXPIRATION=7d
+
+# CORS
+CORS_ORIGIN=https://muscode.com
+
+# Docker
+DOCKER_SOCKET=/var/run/docker.sock
+
+# Limits
+MAX_CODE_LENGTH=50000
+MAX_FILE_SIZE=5242880
+EXECUTION_TIMEOUT=30
+MEMORY_LIMIT=256
+
+# Email (Optional)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=noreply@muscode.com
+SMTP_PASS=your_email_password
+```
+
+---
+
+## Implementation Roadmap
+
+### Phase 1: Core Infrastructure (Week 1-2)
+- ✓ Database setup and migrations
+- ✓ Basic API structure
+- ✓ Authentication system
+- ✓ Docker executor MVP
+
+### Phase 2: Execution Engine (Week 3-4)
+- ✓ Job queue implementation
+- ✓ Multi-language support
+- ✓ WebSocket integration
+- ✓ Real-time output streaming
+
+### Phase 3: Project Management (Week 5-6)
+- ✓ Project CRUD operations
+- ✓ File management
+- ✓ Multi-file compilation
+- ✓ Project sharing
+
+### Phase 4: Advanced Features (Week 7-8)
+- ✓ Collaborative editing
+- ✓ Code templates
+- ✓ Project forking
+- ✓ Statistics dashboard
+
+### Phase 5: Production Hardening (Week 9-10)
+- ✓ Security audit
+- ✓ Performance optimization
+- ✓ Load testing
+- ✓ Monitoring setup
+- ✓ Documentation
+
+---
+
+## Next Steps
+
+This specification provides a complete blueprint for implementing MUSCode. Key deliverables included:
+
+1. ✅ System Architecture Diagram
+2. ✅ REST API Specification with all endpoints
+3. ✅ Docker Execution Engine with security
+4. ✅ Complete Database Schema (SQL + Prisma)
+5. ✅ WebSocket Integration for real-time features
+6. ✅ Security Implementation guide
+7. ✅ Deployment Configuration
+
+**Ready for development team handoff!**
